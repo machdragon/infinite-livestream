@@ -1,0 +1,109 @@
+# FastH3 live — continuous-chain configuration.
+#
+# `inference` is the generation recipe and the seam knobs; `runtime` is the
+# weight layout and the engine shape. live_h3_assets.py reads this file (the
+# runtime hands over the path and does not parse it). The engine block mirrors
+# `fast-h3/fasth3.yaml` — the same measured VSA/FA4/compile profile — because
+# it is the same checkpoint on the same hardware; only the queue is replaced by
+# the chain (clip length, seam, buffer depth).
+
+inference:
+  # Aspect the session starts at. `set_canvas` can change it while no chain is
+  # running, to any entry in clip_plan.ASPECT_CHOICES. 16:9 resolves to
+  # 1344x768 — the canvas every published FastH3 number was measured at.
+  aspect: "16:9"
+
+  # Length of each clip the chain generates, before the seam overlap.
+  # `set_clip_seconds` changes it for the next chain. 5.167 s is the shortest
+  # the checkpoint generates (124 frames) and the one the validated bear chain
+  # used: short clips seam more often but keep generation furthest ahead of
+  # playback, which is what a continuous stream needs. Raise it to seam less
+  # once a GPU pass confirms the longer clip still builds inside the playout
+  # budget.
+  clip_seconds: 5.167
+
+  # Seam stitch. crossfade_frames is the overlap width the tail of one clip and
+  # the head of the next are blended across — 12 frames (0.5 s) is the width the
+  # linear-light "linearfade" was validated at (monotonic luma, no flash).
+  # color_match `per_clip` shifts every continuation clip by one per-channel
+  # offset onto clip 0's last-frame mean, locked for the whole chain so exposure
+  # cannot ratchet; `off` disables it.
+  crossfade_frames: 12
+  color_match: per_clip
+
+  # How many built clips the producer keeps ahead of the emitter (double
+  # buffering). 2 is enough to cover one clip's build time while the previous
+  # streams; each buffered clip is ~1 GB of uint8 pixels at 768p, so size
+  # resources.memory with it.
+  buffer_depth: 2
+
+  # Seed the chain's first clip generates from; each continuation advances it by
+  # one. `set_seed` overrides for the next chain.
+  seed: 1000
+
+  # Sigma-grid POINTS, not transformer forwards. The distilled schedule is
+  # t=999,749,500,250 -> 0: five points and exactly four forwards. Changing this
+  # leaves the trained schedule and is not supported by the checkpoint.
+  num_inference_steps: 5
+
+  # Video Sparse Attention — the checkpoint's trained and measured policy
+  # (fastvideo_inference.json). The sm100a kernel is built from source at image
+  # build time; sitecustomize.py widens its (10, 0)-only device gate so a B300
+  # (10.3) takes the fast route too. `triton` is the portable, much slower
+  # fallback for a non-Blackwell box.
+  vsa_sparsity: 0.9
+  vsa_tile_size: 64
+  vsa_kernel: sm100a
+
+  # FA4 for the dense (text and audio) attention paths, and the inference-only
+  # H3 fusions. Both are part of the measured profile.
+  fa4: true
+  h3_fusions: true
+
+  # Regional compile of the transformer blocks, and an independently compiled
+  # video VAE decoder. Regional compile is shape-keyed, which is why every clip
+  # length and canvas — and BOTH the T2VA and the FL2VA shape — has to be warmed.
+  inference_torch_compile: true
+  compile_vae: true
+
+  # Sequence-parallel all-to-all route. `off` reproduces the measured profile.
+  ulysses_a2a: "off"
+
+  # Canvases warmed at load, both the T2VA and the FL2VA shape at each. Adding an
+  # entry costs pod-boot time; leaving one out means the first clip at that
+  # canvas pays a one-off compile stall.
+  warmup_aspects: ["16:9"]
+
+  # Clip lengths warmed at load. The live channel generates one length for a
+  # whole chain, so "default" (just clip_seconds) is the right setting — both
+  # the T2VA and FL2VA shape are warmed at it, so neither the first clip nor the
+  # first continuation stalls. Set to "all" only if you expect to change
+  # clip_seconds between chains and want to spare the ~20 s first-use compile.
+  warmup_lengths: "default"
+
+runtime:
+  # Weight bundle layout, relative to the mounted weights root. One HF snapshot
+  # carries every component — transformer, text encoder, both VAEs, both
+  # schedulers, tokenizer and processor. "." means the components sit directly
+  # under the weights root.
+  checkpoint_dir: "."
+
+  # Sequence parallelism spans every GPU (sp_size == num_gpus, tp_size 1).
+  # Eight is what keeps a continuous chain free of build-starved boundaries.
+  # The count must divide H3's 56 attention heads.
+  num_gpus: 8
+
+  # true replicates the transformer on every rank — the configuration
+  # FastVideo's published numbers were measured at, and the fastest denoise.
+  # The resident text encoder below is what leaves the VRAM for it.
+  replicated_dit: true
+
+  # Offload policy. On a dedicated 8-GPU Blackwell pod the resident footprint
+  # fits comfortably in VRAM, so both are off: no per-clip page-in, and the
+  # host stays small. Turn text-encoder offload back on only for shared
+  # machines, together with pin_cpu_memory and a much larger resources.memory.
+  offload_text_encoder: false
+  offload_vae: false
+
+  # Pinned host buffers only matter when the offload above is on; off with it.
+  pin_cpu_memory: false

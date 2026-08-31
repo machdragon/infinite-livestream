@@ -1,0 +1,131 @@
+# Reactor model specification for the FastH3 live (continuous-chain) channel.
+#
+# A sibling of the hard-cut `fast-h3` channel: same engine, same 148 GB
+# checkpoint, same solved infrastructure (see the shared notes below), but the
+# model chains clips into one continuous stream from a single held prompt
+# instead of playing a queue of independent clips with a black flush between.
+# Only the model name, the runtime import, the config file, and this
+# description differ from `fast-h3/reactor.yaml`; the build and resource blocks
+# are identical because the engine and its kernels are.
+$schema: reactor/v1
+
+model:
+  name: fast-h3-live
+  # Bare semver, no `v` prefix — the platform's release tag format; the
+  # registration validator refuses a prefixed one.
+  version: 0.1.0
+  description: |
+    Generate one continuous 768p video-and-audio stream from a single prompt.
+    MiniMax-H3 (35B), distilled by FastVideo to four transformer forwards with
+    90% sparse video attention, generates clip after clip off the one prompt —
+    the first text-to-video, every clip after FL2VA-anchored on the previous
+    clip's last frame — and stitches them at the seam (linear-light crossfade,
+    per-clip color-match, equal-power audio) so the result plays as one video.
+    `start` begins the chain, `stop` ends it, `set_prompt` steers it live.
+  # Eight Blackwell GPUs: the count that builds faster than the stream plays
+  # (~12.9 s for a 15 s clip on eight B200s, against ~15.5-17 s on four). A
+  # continuous chain needs builds to outpace playback or every clip boundary
+  # waits on the GPUs, so the extra four buy the realtime headroom, not just
+  # shorter startup waits. The count must divide H3's 56 attention heads
+  # (1, 2, 4, 7, 8 …). The image serves B200 and B300 (Blackwell Ultra,
+  # compute capability 10.3) with the same profile; its kernels are compiled
+  # for both 10.0a and 10.3a — see TORCH_CUDA_ARCH_LIST below.
+  #
+  # The CPU allocation is measured, not guessed. The engine runs nine
+  # processes (the runtime plus eight spawned workers), and NCCL host
+  # threads, kernel-launch threads, and the decode gather all burn CPU
+  # between collectives. At request 8 / limit 32 on a 192-vCPU HGX B200
+  # node the cgroup throttled 38% of CFS periods and the pod built at
+  # 0.85x realtime against 1.16x on identical unthrottled silicon. Request
+  # and limit are both pinned at the account's model CPU quota (the registry
+  # 429s any limit above it), and OMP_NUM_THREADS in runtime_env stops the
+  # over-threading that amplified the throttle.
+  #
+  # memory: with nothing CPU-offloaded the host holds the load-time transient
+  # of eight ranks streaming a 148 GB bundle plus the double-buffer of built
+  # clips (bounded by inference.buffer_depth in live_h3.yaml — a couple of
+  # clips of uint8 pixels). If the offload flags in live_h3.yaml are turned
+  # back on, memory must rise to several hundred Gi (8 ranks × ~63 GB pinned)
+  # — see the note there.
+  resources:
+    gpu:
+      type: NVIDIA_B200
+      count: 8
+    cpu:
+      request: "64"
+      limit: "64"
+    # Sized for the resident text encoder: on eight dedicated Blackwell GPUs
+    # each rank holds its own copy in VRAM (live_h3.yaml turns the offload
+    # off), so the host carries only the load transient and the double-buffer.
+    memory:
+      request: 64Gi
+      limit: 256Gi
+
+runtime:
+  import: live_h3:LiveH3
+  config: live_h3.yaml
+  # The weights bundle is the same checkpoint the hard-cut channel serves;
+  # point at the shared bundle so it is not uploaded twice.
+  weights_path: ~/.cache/reactor_registry/fast-h3
+  # Left off until gap-free continuity is confirmed on a GPU pass. The seams
+  # are stitched (no hard cuts), so a recording would be continuous — but
+  # whether generation keeps ahead of playback at 768p is not yet validated;
+  # enable it once it is.
+  recording:
+    enabled: false
+
+build:
+  runtime_version: "3.2.6"
+  python_requirements: requirements.txt
+  # CUDA 13 is the model's requirement, not a preference: the VSA-H3 sparse
+  # kernel and the FA4 CuTe kernels are both cu130 builds.
+  cuda_version: "13.1.2"
+  python_version: "3.12"
+  # ninja keeps any torch BuildExtension parallel. git is what pip drives to
+  # resolve the `git+https` flash-attn-4 requirement. libgl1 + libglib2.0-0
+  # are for opencv: fastvideo depends on `opencv-python` (the GUI build), so
+  # the GUI shared libraries have to be present or the first `import cv2` dies
+  # on `libGL.so.1`.
+  system_packages:
+    - build-essential
+    - ffmpeg
+    - git
+    - libgl1
+    - libglib2.0-0
+    - ninja-build
+  # torch comes from the cu130 index in requirements.txt; UV_OVERRIDE feeds the
+  # requirements back in as resolver overrides, which is what lets the runtime's
+  # protobuf>=7.35.1 defeat cutlass-dsl's stale <7 cap — see the protobuf note
+  # in requirements.txt.
+  build_env:
+    UV_INDEX_STRATEGY: unsafe-best-match
+    UV_OVERRIDE: /app/requirements.txt
+    # fastvideo-kernel and flash-attn-4 compile from source during the build.
+    # Arch-specific (`a`) binaries do not run forward even within a family, so
+    # the list carries both Blackwell (10.0a, B200) and Blackwell Ultra
+    # (10.3a, B300). The kernel package's Python-side gate only accepts
+    # (10, 0) — sitecustomize.py widens it to this list; keep the two in sync
+    # (_VSA_BUILT_CAPABILITIES). When this list changes, build once with
+    # UV_NO_CACHE=1: uv keys its built-wheel cache on the source revision alone.
+    TORCH_CUDA_ARCH_LIST: "10.0a;10.3a"
+    CMAKE_BUILD_PARALLEL_LEVEL: "32"
+    MAX_JOBS: "32"
+  # Long-lived server allocating a clip's worth of pixels over and over:
+  # expandable-segments is what stops fragmentation creeping across a
+  # multi-hour chain. Offline turns a missing bundle file into a clear error
+  # instead of a hang. PYTHONPATH=/app is load-bearing: it makes every
+  # interpreter in the container — the runtime and each spawned engine worker —
+  # import /app/sitecustomize.py at start, the only place its two fixes can
+  # land inside the workers: raising dynamo's recompile limit and widening the
+  # VSA kernel's device gate to every arch in TORCH_CUDA_ARCH_LIST above.
+  runtime_env:
+    PYTORCH_ALLOC_CONF: expandable_segments:True
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    PYTHONPATH: /app
+    FASTH3_DYNAMO_RECOMPILE_LIMIT: "64"
+    # torch sizes its intra-op threadpools from nproc, which reports the whole
+    # node inside the container, so nine processes pile thousands of runnable
+    # threads against the CPU quota and CFS throttles them. Eight threads per
+    # process keeps the total under resources.cpu.
+    OMP_NUM_THREADS: "8"
