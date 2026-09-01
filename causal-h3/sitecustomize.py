@@ -119,3 +119,13 @@ class _FixupFinder(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, _FixupFinder())
+
+
+# Ensure the vendored minimax_h3 package is importable.  The causal-h3
+# directory itself is on PYTHONPATH (reactor.yaml sets PYTHONPATH=/app),
+# so `import minimax_h3` resolves to causal-h3/minimax_h3/.  This is a
+# belt-and-suspenders check for local development where PYTHONPATH may
+# not include the causal-h3 directory.
+_causal_h3_dir = os.path.dirname(os.path.abspath(__file__))
+if _causal_h3_dir not in sys.path:
+    sys.path.insert(0, _causal_h3_dir)

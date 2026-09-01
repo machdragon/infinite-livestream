@@ -6,6 +6,13 @@
 # a472c2e44937c88cbf34f89ef1d465e2cd0ab71c. The causal trunk, PDD heads,
 # and control branch are native components of the trained merged family
 # export, loaded through the pinned FastVideo components below.
+#
+# The ai-toolkit H3 runtime subset (transformer, causal, packing, VAEs,
+# text encoder, pipeline, artifacts) is vendored under causal-h3/minimax_h3/
+# from PR #17 head (a472c2e). The vendored transformer has the update_cache
+# flag that the persistent serving model needs for read-only denoise forwards.
+# No pip install is needed for the vendored code; it is on sys.path via
+# the causal-h3 directory (PYTHONPATH or sitecustomize.py).
 --extra-index-url https://download.pytorch.org/whl/cu130
 
 # The cu130 builds the sparse-attention and FA4 kernels are compiled against.

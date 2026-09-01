@@ -1,31 +1,34 @@
-"""Bounded KV cache and clean x0 state for persistent causal H3 generation.
+"""Bounded KV cache configuration and clean x0 state for persistent causal H3.
 
 The persistent model carries two pieces of state across chunks:
 
-1. **KV cache** -- a ``SlidingWindowKVCache`` (from ai-toolkit ``causal.py``)
-   holding per-layer key/value tensors for the sink (text + initial
-   conditions) and a bounded sliding window of recent chunks.  After each
-   chunk's four read-only denoise forwards, the final clean x0 prediction
-   is cache-filled (the transformer appends its new KV) so the next chunk
-   attends to the denoised output.  Eviction is deterministic: sink tokens
-   are always kept; the oldest non-sink tokens are evicted when the window
+1. **KV cache** -- a ``SlidingWindowKVCache`` (from the vendored
+   ``minimax_h3.src.causal``) holding per-layer key/value tensors for the
+   sink (text + initial conditions) and a bounded sliding window of recent
+   chunks.  After each chunk's four read-only denoise forwards
+   (``update_cache=False``), a distinct clean x0 forward at t=0
+   (``update_cache=True``) cache-fills the denoised output so the next
+   chunk attends to it.  Eviction is deterministic: sink tokens are
+   always kept; the oldest non-sink tokens are evicted when the window
    bound is exceeded.
 
-2. **Clean x0 state** -- the denoised video and audio latent rows from the
-   last forward of the previous chunk, carried as the starting point for
-   the next chunk's noisy initialization.  This is what makes the stream
-   continuous rather than a sequence of independent clips.
+2. **Clean x0 state** -- the denoised video and audio latent rows from
+   the clean x0 forward of the previous chunk.  Each chunk starts with
+   fresh noise; the previous x0 is history attended to through the KV
+   cache, not cloned as the new chunk's input.  The x0 state is kept for
+   diagnostic and buffer-management purposes (the VAE decode buffer uses
+   the latent tensors for left-context).
 
-The ``ReadOnlyKVCacheView`` wraps a real ``SlidingWindowKVCache`` and makes
-``append`` a no-op, so the first three forwards of each chunk attend to
-the cached KV without modifying it.  Only the fourth forward uses the real
-cache (with append) to write the clean x0.
+The ``update_cache`` flag on ``MiniMaxH3Transformer.forward()`` (added in
+ai-toolkit PR #17 head, vendored here) controls whether the cache is
+written: ``False`` for read-only denoise forwards, ``True`` for the clean
+x0 cache-fill forward.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 
 @dataclass
@@ -50,57 +53,14 @@ class CacheConfig:
     audio_overlap_latents: int = 10
 
 
-class ReadOnlyKVCacheView:
-    """A read-only view over a ``SlidingWindowKVCache`` that does not append.
-
-    The transformer's ``forward()`` calls ``kv_cache.get(layer_idx)`` to
-    retrieve cached KV and ``kv_cache.append(layer_idx, k, v)`` to write
-    new KV.  This view delegates ``get`` (and the validity/role masks) to
-    the real cache but makes ``append``, ``append_validity``, and
-    ``append_token_roles`` no-ops, so the first three forwards of each
-    chunk attend to the existing cache without modifying it.
-
-    Only the fourth forward (the clean x0 cache-fill) uses the real cache
-    directly, so its new KV is appended and the cache grows.
-    """
-
-    def __init__(self, real_cache: Any) -> None:
-        self._real = real_cache
-
-    def get(self, layer_idx: int) -> Optional[Tuple[Any, Any]]:
-        return self._real.get(layer_idx)
-
-    def append(self, layer_idx: int, k_new: Any, v_new: Any) -> None:
-        pass  # read-only: do not write back
-
-    def append_validity(self, validity: Any) -> None:
-        pass
-
-    def append_token_roles(self, roles: Any) -> None:
-        pass
-
-    def get_validity_mask(self) -> Optional[Any]:
-        return self._real.get_validity_mask()
-
-    def get_token_roles(self) -> Optional[Any]:
-        return self._real.get_token_roles()
-
-    def __len__(self) -> int:
-        return len(self._real)
-
-
 class CleanX0State:
     """Carries the clean video and audio x0 latent rows across chunks.
 
-    After each chunk's four read-only denoise forwards, the final forward's
-    clean x0 prediction (the denoised video_rows and audio_rows) is stored
-    here.  The next chunk initializes its noisy latents from this clean x0
-    (plus fresh noise at the first sigma point), so the stream is
-    continuous rather than a sequence of independent clips.
-
-    The state is separate from the KV cache because the x0 latent feeds
-    the *input* of the next chunk, while the KV cache feeds the *attention*
-    context.
+    After each chunk's clean x0 forward (the 5th forward at t=0 with
+    update_cache=True), the denoised video_rows and audio_rows are stored
+    here.  Each chunk starts with fresh noise; the previous x0 is history
+    attended to through the KV cache.  The x0 state is kept for VAE decode
+    buffer management and diagnostics.
     """
 
     def __init__(self) -> None:
@@ -124,7 +84,7 @@ class CleanX0State:
         return self._chunk_index
 
     def update(self, video_x0: Any, audio_x0: Any, chunk_index: int) -> None:
-        """Store the clean x0 from a chunk's final forward."""
+        """Store the clean x0 from a chunk's clean x0 forward."""
         self._video_x0 = video_x0
         self._audio_x0 = audio_x0
         self._chunk_index = chunk_index
@@ -140,53 +100,46 @@ class VisualVAEDecodeBuffer:
     """Bounded left-latent buffer for incremental VisualVAE decode.
 
     The causal video VAE needs left-context latents to decode a chunk
-    correctly: each 17-frame chunk decodes from 5 latents, but the decoder
-    benefits from adjacent latents for boundary continuity.  This buffer
-    holds the last ``vae_left_latents`` latents from the previous chunk's
-    decode so the next chunk's decode has the context it needs.
+    correctly.  This buffer holds the last ``vae_left_latents`` latents
+    from the previous chunk's decode so the next chunk's decode has the
+    context it needs.  The buffer holds real latent tensors.
 
-    The buffer holds real latent tensors ``(C, T, H, W)``, not placeholders.
+    The buffer also tracks how many pixel frames the left-context latents
+    produced when they were decoded, so the next decode can discard exactly
+    that many frames from the concatenated output.
     """
 
     def __init__(self, left_latents: int) -> None:
         self._left_latents = left_latents
         self._buffer: list[Any] = []
+        self._prev_frame_count: int = 0
 
     @property
     def left_latents(self) -> int:
-        """The configured left-context size."""
         return self._left_latents
 
     @property
     def buffered(self) -> int:
-        """Number of latents currently in the buffer."""
         return len(self._buffer)
 
-    def push(self, latents: Any) -> None:
-        """Push a chunk's decoded latent tensor into the buffer, evicting old ones.
+    @property
+    def prev_frame_count(self) -> int:
+        """How many pixel frames the buffered latents produced, or 0."""
+        return self._prev_frame_count
 
-        Args:
-            latents: The latent tensor ``(B, C, T, H, W)`` from the most
-                recent chunk's decode.  The last ``left_latents`` temporal
-                slices are retained.
-        """
-        # Store the temporal slices as individual latent frames.
+    def push(self, latents: Any, frame_count: int = 0) -> None:
+        """Push a chunk's decoded latent tensor and its pixel frame count."""
         t = latents.shape[2]
         for i in range(t):
             self._buffer.append(latents[:, :, i:i+1])
-        # Keep only the last _left_latents.
         if len(self._buffer) > self._left_latents:
             self._buffer = self._buffer[-self._left_latents:]
+        self._prev_frame_count = frame_count
 
     def context(self) -> Any:
-        """The left-context latents for the next decode, as a concatenated tensor.
-
-        Returns None when no context is available (the first chunk).
-        """
+        """The left-context latents for the next decode, or None."""
         if not self._buffer:
             return None
-        # Use numpy if available (works with both numpy arrays and torch
-        # tensors via conversion); fall back to torch in production.
         try:
             import numpy as np
             return np.concatenate(self._buffer, axis=2)
@@ -195,9 +148,8 @@ class VisualVAEDecodeBuffer:
             return torch.cat(self._buffer, dim=2)
 
     def reset(self) -> None:
-        """Clear the buffer."""
         self._buffer.clear()
-
+        self._prev_frame_count = 0
 
 class AudioVAEOverlapSave:
     """Overlap-save decoder for continuous AudioVAE decode.
@@ -205,12 +157,7 @@ class AudioVAEOverlapSave:
     Audio is decoded in overlapping blocks: each block produces output
     samples, and the overlap from the previous block is saved and mixed
     into the next block's output.  This eliminates boundary artifacts at
-    chunk transitions, which is critical for the persistent stream where
-    there are no hard cuts.
-
-    The buffer holds real waveform tensors at the native 32 kHz stereo rate.
-    Downmixing and resampling to the Reactor wire format (mono 48 kHz)
-    happens after decode, in the backend.
+    chunk transitions.
     """
 
     def __init__(self, overlap_samples: int) -> None:
@@ -220,34 +167,28 @@ class AudioVAEOverlapSave:
 
     @property
     def overlap_samples(self) -> int:
-        """The configured overlap size in samples."""
         return self._overlap_samples
 
     @property
     def has_overlap(self) -> bool:
-        """Whether saved overlap from a previous block is available."""
         return self._saved is not None
 
     def save(self, overlap: Any, chunk_index: int) -> None:
-        """Save the overlap waveform from a decoded block for the next decode."""
         self._saved = overlap
         self._chunk_index = chunk_index
 
     def pop(self) -> Any:
-        """Return and clear the saved overlap."""
         saved = self._saved
         self._saved = None
         return saved
 
     def reset(self) -> None:
-        """Clear the saved overlap."""
         self._saved = None
         self._chunk_index = -1
 
 
 __all__ = [
     "CacheConfig",
-    "ReadOnlyKVCacheView",
     "CleanX0State",
     "VisualVAEDecodeBuffer",
     "AudioVAEOverlapSave",

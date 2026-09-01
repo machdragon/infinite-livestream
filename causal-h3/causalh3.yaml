@@ -58,8 +58,9 @@ inference:
   dense_diagnostic: false
 
 runtime:
-  # GPU count must divide H3's 56 attention heads (1, 2, 4, 7, 8 ...).
-  num_gpus: 8
+  # GPU count: multi-GPU tensor parallelism is not yet wired.
+  # num_gpus > 1 fails at load until implemented. Set to 1 for now.
+  num_gpus: 1
   # Replicated DiT vs FSDP sharding.
   replicated_dit: false
   # Offload policy.
