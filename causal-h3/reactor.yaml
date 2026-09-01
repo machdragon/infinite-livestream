@@ -1,0 +1,62 @@
+# Reactor model specification for the CausalH3 persistent stream.
+$schema: reactor/v1
+
+model:
+  name: causal-h3
+  # Bare semver, no `v` prefix — the platform's release tag format.
+  version: 0.1.0
+  description: |
+    Generate a persistent causal video-and-audio stream from one prompt.
+    MiniMax-H3 (35B), distilled by FastVideo to four transformer forwards
+    with 90% sparse video attention, generates continuously: the KV cache
+    and clean x0 state carry forward across 5-latent media chunks, with no
+    hard cuts at boundaries. Two family slugs: fl2va (text/image/first-last-
+    frame) and ref2va (reference-block). The 60-second session generates
+    1,450 H3 frames and emits 1,440 at 24 fps.
+  resources:
+    gpu:
+      type: NVIDIA_B200
+      count: 8
+    cpu:
+      request: "64"
+      limit: "64"
+    memory:
+      request: 64Gi
+      limit: 256Gi
+
+runtime:
+  import: causalh3:CausalH3
+  config: causalh3.yaml
+  # The weights bundle lives here; nothing is downloaded at load.
+  # The bundle must contain a model-package.json manifest (model-package-v1).
+  weights_path: ~/.cache/reactor_registry/causal-h3
+  recording:
+    enabled: false
+
+build:
+  runtime_version: "3.2.6"
+  python_requirements: requirements.txt
+  # CUDA 13 is the model's requirement: the VSA-H3 sparse kernel and the
+  # FA4 CuTe kernels are both cu130 builds.
+  cuda_version: "13.1.2"
+  python_version: "3.12"
+  system_packages:
+    - build-essential
+    - ffmpeg
+    - git
+    - libgl1
+    - libglib2.0-0
+    - ninja-build
+  build_env:
+    UV_INDEX_STRATEGY: unsafe-best-match
+    UV_OVERRIDE: /app/requirements.txt
+    TORCH_CUDA_ARCH_LIST: "10.0a;10.3a"
+    CMAKE_BUILD_PARALLEL_LEVEL: "32"
+    MAX_JOBS: "32"
+  runtime_env:
+    PYTORCH_ALLOC_CONF: expandable_segments:True
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+    PYTHONPATH: /app
+    CAUSALH3_DYNAMO_RECOMPILE_LIMIT: "64"
+    OMP_NUM_THREADS: "8"
