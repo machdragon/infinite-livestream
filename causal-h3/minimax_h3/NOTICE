@@ -1,0 +1,20 @@
+Vendored MiniMax-H3 runtime subset from ai-toolkit.
+
+Source: https://github.com/machdragon/ai-toolkit
+Commit: a472c2e44937c88cbf34f89ef1d465e2cd0ab71c (PR #17 head)
+
+The files in this directory are copies of the ai-toolkit H3 diffusion
+model runtime at the above commit. They include:
+
+- src/transformer.py: MiniMaxH3Transformer with update_cache flag
+- src/causal.py: KVCache, SlidingWindowKVCache, build_causal_mask
+- src/packing.py: packed sequence geometry, sigma schedules
+- src/vae.py: MiniMaxH3VideoVAE (causal 3D-CNN + ViT decoder)
+- src/audio_vae.py: MiniMaxH3AudioVAE (DAC encoder + BigVGAN decoder)
+- src/pipeline.py: MiniMaxH3Pipeline (reference sampling loop)
+- src/text_encoder.py: trim_caption_tokens
+- artifacts.py: ModelPackage, validate_package
+- schemas/model-package-v1.schema.json: package schema
+
+The ai-toolkit license terms apply to these files. See the ai-toolkit
+repository for the full license text.

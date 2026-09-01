@@ -1,0 +1,72 @@
+# CausalH3 generation recipe, cache bounds, and engine shape.
+#
+# Parsed by causalh3_assets.load_config(); the runtime hands the path from
+# runtime.config in reactor.yaml. Everything here is a default a session
+# starts from; commands can override the session-level fields.
+
+inference:
+  # The family slug: fl2va (text/image/first-last-frame) or ref2va
+  # (reference-block conditioning). Locked once `start` is called.
+  family: fl2va
+
+  # Default aspect ratio; `set_canvas` can change it before `start`.
+  aspect: "16:9"
+
+  # Default seed for the session.
+  seed: 1000
+
+  # Default target duration in seconds. The 60-second session generates
+  # 1,450 H3 frames (85 chunks of 17 + 5 prefix) and emits 1,440 at 24 fps.
+  target_seconds: 60
+
+  # --- VSA-H3 sparse attention ---
+  vsa_enabled: true
+  vsa_kernel: sm100a
+  vsa_sparsity: 0.9
+  vsa_tile_size: 64
+
+  # --- FA4 (flash-attn-4) for dense attention paths ---
+  fa4: true
+
+  # --- H3 fusions ---
+  h3_fusions: true
+
+  # --- torch.compile ---
+  inference_torch_compile: true
+  compile_vae: true
+
+  # --- VAE parallel decode ---
+  vae_parallel_decode: true
+
+  # --- KV cache bounds ---
+  # Sink: text + initial conditions, never evicted.
+  cache_sink_tokens: 256
+  # Window: maximum non-sink tokens retained; oldest evicted first.
+  cache_window_tokens: 512
+
+  # --- VisualVAE incremental decode ---
+  # Left-context latents kept from the previous chunk for boundary continuity.
+  vae_left_latents: 5
+
+  # --- AudioVAE overlap-save ---
+  # Overlap latents saved between decode blocks for continuous audio.
+  audio_overlap_latents: 10
+
+  # --- Dense diagnostic mode (non-realtime) ---
+  # When vsa_enabled is false, this must be true to acknowledge the
+  # non-realtime diagnostic profile. Never a silent fallback.
+  dense_diagnostic: false
+
+runtime:
+  # GPU count: multi-GPU tensor parallelism is not yet wired.
+  # num_gpus > 1 fails at load until implemented. Set to 1 for now.
+  num_gpus: 1
+  # Replicated DiT vs FSDP sharding.
+  replicated_dit: false
+  # Offload policy.
+  offload_text_encoder: false
+  offload_vae: false
+  pin_cpu_memory: false
+  # Checkpoint directory inside the weights bundle.
+  # "." means components sit directly under the weights root.
+  checkpoint_dir: "."

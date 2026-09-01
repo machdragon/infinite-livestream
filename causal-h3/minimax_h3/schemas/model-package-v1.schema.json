@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://h3.local/schemas/model-package-v1.schema.json",
+  "title": "H3 Model Package v1",
+  "description": "Artifact package describing a MiniMax H3 model assembly: base model, at most one temporary streaming adapter, native causal trunk, native PDD heads, native control branch, FL2VA/Ref2VA mode, revisions, hashes, metrics, dataset revision, and cost. An adapter stack is forbidden: at most one adapter component is permitted and it must be flagged temporary.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "package_id",
+    "mode",
+    "components",
+    "revisions",
+    "hashes",
+    "dataset_revision",
+    "cost"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "model-package-v1"
+    },
+    "package_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "description": "Conditioning mode. fl2va = first-frame image-to-video; ref2va = reference-block video.",
+      "type": "string",
+      "enum": ["fl2va", "ref2va"]
+    },
+    "components": {
+      "description": "Typed, exclusive component descriptors. Exactly one base is required. At most one adapter is permitted and it must be temporary (adapter stack forbidden).",
+      "type": "object",
+      "required": ["base", "causal_trunk", "pdd_heads", "control_branch"],
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/baseComponent"
+        },
+        "adapter": {
+          "description": "Optional temporary streaming adapter. At most one. Must be temporary.",
+          "$ref": "#/$defs/adapterComponent"
+        },
+        "causal_trunk": {
+          "$ref": "#/$defs/nativeComponent"
+        },
+        "pdd_heads": {
+          "$ref": "#/$defs/nativeComponent"
+        },
+        "control_branch": {
+          "$ref": "#/$defs/nativeComponent"
+        }
+      }
+    },
+    "revisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": { "type": "string", "minLength": 1 },
+        "adapter": { "type": "string", "minLength": 1 },
+        "causal_trunk": { "type": "string", "minLength": 1 },
+        "pdd_heads": { "type": "string", "minLength": 1 },
+        "control_branch": { "type": "string", "minLength": 1 }
+      },
+      "required": ["base", "causal_trunk", "pdd_heads", "control_branch"]
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "adapter": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "causal_trunk": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "pdd_heads": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "control_branch": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
+      },
+      "required": ["base", "causal_trunk", "pdd_heads", "control_branch"]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+    "dataset_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cost": {
+      "$ref": "#/$defs/cost"
+    }
+  },
+  "$defs": {
+    "baseComponent": {
+      "type": "object",
+      "required": ["type", "name_or_path", "arch", "partition"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "const": "base" },
+        "name_or_path": { "type": "string", "minLength": 1 },
+        "arch": { "type": "string", "const": "minimax_h3" },
+        "partition": {
+          "type": "string",
+          "enum": ["fl2va", "fl2va_pruned", "ref2va", "ref2va_pruned"]
+        },
+        "quantize": { "type": "boolean" },
+        "qtype": { "type": "string" }
+      }
+    },
+    "adapterComponent": {
+      "type": "object",
+      "required": ["type", "name_or_path", "temporary"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "const": "adapter" },
+        "name_or_path": { "type": "string", "minLength": 1 },
+        "temporary": { "type": "boolean", "const": true },
+        "rank": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "nativeComponent": {
+      "type": "object",
+      "required": ["type", "native"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "enum": ["causal_trunk", "pdd_heads", "control_branch"] },
+        "native": { "type": "boolean", "const": true },
+        "num_layers": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "required": ["currency", "amount"],
+      "additionalProperties": false,
+      "properties": {
+        "currency": { "type": "string", "minLength": 1 },
+        "amount": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}
